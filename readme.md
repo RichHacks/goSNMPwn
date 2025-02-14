@@ -20,7 +20,7 @@ Go easy with the workers. The default is 10 but even that might be too much for 
 
 ### Basic Enumeration
 ~~~bash
-./goSNMPwn --enum -ips 10.10.10.1 -protocol udp #or tcp
+./goSNMPwn --enum -ips 10.10.10.1 -protocol udp [-port 161]
 === Testing IP: 10.10.10.1 ===
 
 SNMP Engine Details:
@@ -38,7 +38,7 @@ MAC Address: 4c:b9:07:28:8c:06
 User enumeration relies on the fact that SNMP responds in a specific way when users dont exist. This allows us to use large lists of potential users to enumerate valid ones prior to brute forcing.
 
 ~~~bash
-./goSNMPwn --userenum -ips 10.10.10.1 -userfile testusers.txt
+./goSNMPwn --userenum -ips 10.10.10.1 -userfile testusers.txt [-port 161]
 
 === Testing IP: 10.10.10.1 ===
 [+] Valid username found on 10.10.10.1: cisco
@@ -53,7 +53,7 @@ As you can see, it drops these to a file so we can use them in further attacks
 
 ### Password Brute Force
 ~~~bash
-./goSNMPwn --brute -ips 10.10.10.1 -userfile testusers.txt -passfile passwords.txt -workers 60
+./goSNMPwn --brute -ips 10.10.10.1 -userfile testusers.txt -passfile passwords.txt [-port 161] -workers 60
 [*] Starting brute force with 60 workers
 [*] Total combinations to test: 1272362
 [*] Combinations breakdown:
@@ -105,6 +105,7 @@ I included some basic ones for both the password and encryption passphrases, but
 - `-brute`: Perform password brute force
 - `-protocol`: SNMP protocol to use (udp or tcp)
 - `-workers`: Number of concurrent workers for brute force (default: 10)
+- `-port`: SNMP port number (default: 161)
 
 
 ## Security Considerations

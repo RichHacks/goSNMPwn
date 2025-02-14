@@ -210,10 +210,10 @@ func getResultMessage(err error) string {
 	return fmt.Sprintf("Error: %v", err)
 }
 
-func performEnumeration(ips []string, protocol string) []SNMPResult {
+func performEnumeration(ips []string, protocol string, port int) []SNMPResult {
 	results := []SNMPResult{}
 	config := &SNMPv3Config{
-		Port:         161,
+		Port:         port,
 		Username:     "myuser",
 		AuthProtocol: "SHA",
 		AuthPassword: "authpass",
@@ -270,6 +270,7 @@ func main() {
 	userEnumFlag := flag.Bool("userenum", false, "Perform username enumeration")
 	protocol := flag.String("protocol", "udp", "SNMP protocol to use (udp or tcp)")
 	workers := flag.Int("workers", 10, "Number of workers for brute force")
+	port := flag.Int("port", 161, "SNMP port number")
 	flag.Parse()
 
 	if !*enumFlag && !*bruteFlag && !*userEnumFlag {
@@ -282,24 +283,24 @@ func main() {
 	}
 
 	if *enumFlag {
-		results := performEnumeration(ips, *protocol)
+		results := performEnumeration(ips, *protocol, *port)
 		displayEnumResults(results)
 	} else if *userEnumFlag {
 		if *userFile == "" {
 			log.Fatal("Username enumeration requires --userfile")
 		}
-		results := performUserEnum(ips, *userFile, *protocol)
+		results := performUserEnum(ips, *userFile, *protocol, *port)
 		saveUserResults(results)
 	} else if *bruteFlag {
 		if *userFile == "" || *passFile == "" {
 			log.Fatal("Brute force requires --userfile and --passfile")
 		}
-		results := performBruteForce(*userFile, *passFile, *encFile, *ipList, *ipFile, *protocol, *workers)
+		results := performBruteForce(*userFile, *passFile, *encFile, *ipList, *ipFile, *protocol, *workers, *port)
 		displayBruteResults(results)
 	}
 }
 
-func performUserEnum(ips []string, userFile string, protocol string) []SNMPResult {
+func performUserEnum(ips []string, userFile string, protocol string, port int) []SNMPResult {
 	results := []SNMPResult{}
 	usernames, err := loadUsernames(userFile)
 	if err != nil {
@@ -307,7 +308,7 @@ func performUserEnum(ips []string, userFile string, protocol string) []SNMPResul
 	}
 
 	config := &SNMPv3Config{
-		Port:         161,
+		Port:         port,
 		AuthProtocol: "SHA",
 		AuthPassword: "authpass",
 		PrivProtocol: "AES",
@@ -446,7 +447,7 @@ func loadUserCombos(filename, ipList, ipFile string) ([]string, error) {
 	return combos, nil
 }
 
-func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol string, maxWorkers int) []SNMPResult {
+func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol string, maxWorkers, port int) []SNMPResult {
 	results := []SNMPResult{}
 	var resultsMutex sync.Mutex
 	foundUsers := make(map[string]bool)
@@ -509,7 +510,7 @@ func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol str
 				resultsMutex.Unlock()
 
 				currentProgress := atomic.AddInt32(&progress, 1)
-				if result := tryNullAuth(combo.ip, combo.username, protocol, currentProgress, totalCombos); result != nil {
+				if result := tryNullAuth(combo.ip, combo.username, protocol, currentProgress, totalCombos, port); result != nil {
 					resultsMutex.Lock()
 					results = append(results, *result)
 					foundUsers[combo.username] = true
@@ -524,7 +525,7 @@ func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol str
 					}
 					for _, pass := range passwords {
 						currentProgress = atomic.AddInt32(&progress, 1)
-						if result := tryAuthNoPriv(combo.ip, combo.username, pass, authProto, protocol, currentProgress, totalCombos); result != nil {
+						if result := tryAuthNoPriv(combo.ip, combo.username, pass, authProto, protocol, currentProgress, totalCombos, port); result != nil {
 							resultsMutex.Lock()
 							results = append(results, *result)
 							foundUsers[combo.username] = true
@@ -540,7 +541,7 @@ func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol str
 						for _, privProto := range privProtos {
 							for _, privPass := range encPasswords {
 								currentProgress = atomic.AddInt32(&progress, 1)
-								if result := tryAuthPriv(combo.ip, combo.username, pass, privPass, authProto, privProto, protocol, currentProgress, totalCombos); result != nil {
+								if result := tryAuthPriv(combo.ip, combo.username, pass, privPass, authProto, privProto, protocol, currentProgress, totalCombos, port); result != nil {
 									resultsMutex.Lock()
 									results = append(results, *result)
 									foundUsers[combo.username] = true
@@ -636,11 +637,11 @@ func displayBruteResults(results []SNMPResult) {
 	table.Render()
 }
 
-func tryNullAuth(ip, username, protocol string, current, total int32) *SNMPResult {
+func tryNullAuth(ip, username, protocol string, current, total int32, port int) *SNMPResult {
 	fmt.Printf("[*] [NULL Auth] Testing %s@%s (%d/%d)\n", username, ip, current, total)
 	config := &SNMPv3Config{
 		Target:      ip,
-		Port:        161,
+		Port:        port,
 		Username:    username,
 		Transport:   protocol,
 		TimeoutSecs: 2,
@@ -666,12 +667,12 @@ func tryNullAuth(ip, username, protocol string, current, total int32) *SNMPResul
 	return nil
 }
 
-func tryAuthNoPriv(ip, username, password, authProto, protocol string, current, total int32) *SNMPResult {
+func tryAuthNoPriv(ip, username, password, authProto, protocol string, current, total int32, port int) *SNMPResult {
 	fmt.Printf("[*] [AuthNoPriv] Testing %s@%s (Protocol:%s Auth:%s) (%d/%d)\n",
 		username, ip, authProto, password, current, total)
 	config := &SNMPv3Config{
 		Target:        ip,
-		Port:          161,
+		Port:          port,
 		Username:      username,
 		AuthProtocol:  authProto,
 		AuthPassword:  password,
@@ -707,12 +708,12 @@ func tryAuthNoPriv(ip, username, password, authProto, protocol string, current, 
 	}
 }
 
-func tryAuthPriv(ip, username, authPass, privPass, authProto, privProto, protocol string, current, total int32) *SNMPResult {
+func tryAuthPriv(ip, username, authPass, privPass, authProto, privProto, protocol string, current, total int32, port int) *SNMPResult {
 	fmt.Printf("[*] [AuthPriv] Testing %s@%s (Protocols:%s/%s Auth:%s Priv:%s) (%d/%d)\n",
 		username, ip, authProto, privProto, authPass, privPass, current, total)
 	config := &SNMPv3Config{
 		Target:        ip,
-		Port:          161,
+		Port:          port,
 		Username:      username,
 		AuthProtocol:  authProto,
 		AuthPassword:  authPass,
