@@ -1,0 +1,5 @@
+cisco
+password
+public
+private
+snmp
