@@ -45,6 +45,16 @@ type SNMPResult struct {
 	Command      string
 }
 
+type SNMPLogger struct{}
+
+func (l *SNMPLogger) Print(v ...interface{}) {
+	fmt.Printf("SNMP DEBUG: %v\n", v...)
+}
+
+func (l *SNMPLogger) Printf(format string, v ...interface{}) {
+	fmt.Printf("SNMP DEBUG: "+format, v...)
+}
+
 func NewSNMPv3Client(config *SNMPv3Config) (*SNMPv3Client, error) {
 	client := &gosnmp.GoSNMP{
 		Target:        config.Target,
@@ -65,6 +75,15 @@ func NewSNMPv3Client(config *SNMPv3Config) (*SNMPv3Client, error) {
 
 	err := client.Connect()
 	if err != nil {
+		fmt.Printf("SNMP Error for user %s: %v\n", config.Username, err)
+		if client.Conn != nil {
+			// Read the raw response
+			buf := make([]byte, 4096)
+			n, _ := client.Conn.Read(buf)
+			if n > 0 {
+				fmt.Printf("Raw response: %x\n", buf[:n])
+			}
+		}
 		return nil, fmt.Errorf("connect error: %v", err)
 	}
 
@@ -73,20 +92,6 @@ func NewSNMPv3Client(config *SNMPv3Config) (*SNMPv3Client, error) {
 
 func (c *SNMPv3Client) Get(oids []string, showDetails bool) (map[string]interface{}, error) {
 	result, err := c.client.Get(oids)
-
-	if showDetails {
-		if usmParams, ok := c.client.SecurityParameters.(*gosnmp.UsmSecurityParameters); ok {
-			fmt.Printf("\nSNMP Engine Details:\n")
-			fmt.Printf("Authorization Engine ID (hex): %x\n", usmParams.AuthoritativeEngineID)
-			fmt.Printf("Authorization Engine Boots: %d\n", usmParams.AuthoritativeEngineBoots)
-			fmt.Printf("Authorization Engine Time: %d\n", usmParams.AuthoritativeEngineTime)
-
-			fmt.Println("\nParsed Authorization Engine ID:")
-			engineID := []byte(usmParams.AuthoritativeEngineID)
-			parseEngineID(engineID)
-		}
-	}
-
 	if err != nil {
 		return nil, fmt.Errorf("get error: %v", err)
 	}
@@ -231,7 +236,7 @@ func performEnumeration(ips []string, protocol string, port int) []SNMPResult {
 			results = append(results, SNMPResult{
 				IP:      ip,
 				Success: false,
-				Message: fmt.Sprintf("Connection failed: %v", err),
+				Message: err.Error(),
 			})
 			continue
 		}
@@ -242,7 +247,7 @@ func performEnumeration(ips []string, protocol string, port int) []SNMPResult {
 		results = append(results, SNMPResult{
 			IP:      ip,
 			Success: err == nil,
-			Message: getResultMessage(err),
+			Message: err.Error(),
 		})
 	}
 	return results
@@ -307,9 +312,11 @@ func performUserEnum(ips []string, userFile string, protocol string, port int) [
 		log.Fatalf("Failed to load usernames: %v", err)
 	}
 
+	// Prioritize most common auth protocols
+	authProtos := []string{"SHA", "MD5"} // Removed less common protocols
+
 	config := &SNMPv3Config{
 		Port:         port,
-		AuthProtocol: "SHA",
 		AuthPassword: "authpass",
 		PrivProtocol: "AES",
 		PrivPassword: "privpass",
@@ -323,31 +330,68 @@ func performUserEnum(ips []string, userFile string, protocol string, port int) [
 
 		for _, username := range usernames {
 			config.Username = username
-			client, err := NewSNMPv3Client(config)
-			if err != nil {
-				if strings.Contains(err.Error(), "unknown username") {
-					continue
-				}
-				fmt.Printf("Failed to create SNMP client: %v\n", err)
-				continue
-			}
-			defer client.Close()
+			userFound := false
 
-			oids := []string{"1.3.6.1.2.1.1.1.0"}
-			_, err = client.Get(oids, false)
-			if err != nil {
-				if strings.Contains(err.Error(), "unknown username") {
-					continue
+			for _, authProto := range authProtos {
+				config.AuthProtocol = authProto
+				client, err := NewSNMPv3Client(config)
+
+				if err != nil {
+					errLower := strings.ToLower(err.Error())
+					if strings.Contains(errLower, "unknown user") {
+						continue // Try next auth protocol
+					}
+					// Any other connection error might indicate a valid user
+					if !userFound {
+						userFound = true
+						results = append(results, SNMPResult{
+							IP:           ip,
+							Username:     username,
+							AuthProtocol: authProto,
+							Success:      true,
+						})
+						fmt.Printf("[+] Valid username found on %s: %s\n", ip, username)
+					}
+					if client != nil {
+						client.Close()
+					}
+					break // Found valid user, no need to try other auth protocols
 				}
+
+				oids := []string{"1.3.6.1.2.1.1.1.0"}
+				_, err = client.Get(oids, false)
+
+				if err != nil {
+					errLower := strings.ToLower(err.Error())
+					if strings.Contains(errLower, "unknown user") {
+						client.Close()
+						break // User doesn't exist, try next username
+					} else if strings.Contains(errLower, "timeout") || strings.Contains(errLower, "nil") {
+						client.Close()
+						continue // Try next auth protocol
+					} else {
+						// Any other error might indicate a valid user
+						if !userFound {
+							userFound = true
+							results = append(results, SNMPResult{
+								IP:           ip,
+								Username:     username,
+								AuthProtocol: authProto,
+								Success:      true,
+							})
+							fmt.Printf("[+] Valid username found on %s: %s\n", ip, username)
+						}
+						client.Close()
+						break // Found valid user, no need to try other auth protocols
+					}
+				}
+
+				client.Close()
 			}
 
-			// If we get here, the username is valid (either no error or an error other than "unknown username")
-			results = append(results, SNMPResult{
-				IP:       ip,
-				Username: username,
-				Success:  true,
-			})
-			fmt.Printf("[+] Valid username found on %s: %s\n", ip, username)
+			if !userFound {
+				fmt.Printf("[-] %s: Invalid user\n", username)
+			}
 		}
 	}
 	return results

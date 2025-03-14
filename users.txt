@@ -7,6 +7,7 @@ snmpd
 mngt
 cisco
 admin
+snmpforti
 v3read
 v3write
 snmpuser
