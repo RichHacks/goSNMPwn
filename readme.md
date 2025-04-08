@@ -52,6 +52,15 @@ As you can see, it drops these to a file so we can use them in further attacks
 
 
 ### Password Brute Force
+
+We should default to using the foundusers file generated during userenum. When we do this, we do not need to specify the IP addresses with the `-ips` or `-ipfile` flags because the file contains IP:User combos, so we can just...
+
+~~~
+./goSNMPwn --brute --userfile foundusers_20250213_185106.txt --passfile passwords.txt [-port 161] -workers 60
+~~~
+
+
+
 ~~~bash
 ./goSNMPwn --brute -ips 10.10.10.1 -userfile testusers.txt -passfile passwords.txt [-port 161] -workers 60
 [*] Starting brute force with 60 workers
