@@ -326,7 +326,8 @@ func main() {
 		if *userFile == "" {
 			log.Fatal("Username enumeration requires --userfile")
 		}
-		results := performUserEnum(getIPList(*ipList, *ipFile), *userFile, *protocol, *port)
+		results := performUserEnum(getIPList(*ipList, *ipFile), *userFile, *protocol, *port, *workers)
+		displayUserEnumResults(results)
 		saveUserResults(results)
 	} else if *bruteFlag {
 		if *userFile == "" || *passFile == "" {
@@ -353,64 +354,94 @@ func main() {
 	}
 }
 
-func performUserEnum(ips []string, userFile string, protocol string, port int) []SNMPResult {
+func performUserEnum(ips []string, userFile string, protocol string, port int, workers int) []SNMPResult {
 	results := []SNMPResult{}
+	var resultsMutex sync.Mutex
+
+	// We only need to load standalone usernames here
 	usernames, err := loadUsernames(userFile)
 	if err != nil {
 		log.Fatalf("Failed to load usernames: %v", err)
 	}
 
-	// Prioritize most common auth protocols
-	authProtos := []string{"SHA", "MD5"} // Removed less common protocols
-
-	config := &SNMPv3Config{
-		Port:         port,
-		AuthPassword: "authpass",
-		PrivProtocol: "AES",
-		PrivPassword: "privpass",
-		TimeoutSecs:  2,
-		Transport:    protocol,
+	// Create a channel for work items (username + progress)
+	type workItem struct {
+		username string
+		current  int
 	}
+	workChan := make(chan workItem)
+	var wg sync.WaitGroup
 
-	for _, ip := range ips {
-		fmt.Printf("\n=== Testing IP: %s ===\n", ip)
-		config.Target = ip
+	totalTests := len(usernames)
+	fmt.Printf("[*] Starting user enumeration with %d workers\n", workers)
+	fmt.Printf("[*] Testing %d usernames against %d IPs\n", len(usernames), len(ips))
 
-		for _, username := range usernames {
-			config.Username = username
-			userFound := false
+	// Start worker pool
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			config := &SNMPv3Config{
+				Port:         port,
+				AuthPassword: "authpass",
+				PrivProtocol: "AES",
+				PrivPassword: "privpass",
+				TimeoutSecs:  2,
+				Transport:    protocol,
+			}
 
-			for _, authProto := range authProtos {
-				config.AuthProtocol = authProto
-				client, err := NewSNMPv3AuthClient(config)
+			for work := range workChan {
+				username := work.username
+				for _, ip := range ips {
+					config.Target = ip
+					config.Username = username
+					userFound := false
 
-				if err == nil { // Connection successful
-					oids := []string{"1.3.6.1.2.1.1.1.0"}
-					_, err = client.Get(oids, false)
-
-					if err == nil { // Get successful
-						if !userFound {
-							userFound = true
-							results = append(results, SNMPResult{
-								IP:           ip,
-								Username:     username,
-								AuthProtocol: authProto,
-								Success:      true,
-							})
-							color.Green("[+] Valid username found on %s: %s", ip, username)
+					// Try both SHA and MD5
+					for _, authProto := range []string{"SHA", "MD5"} {
+						if userFound {
+							break
 						}
-						client.Close()
-						break
+
+						config.AuthProtocol = authProto
+						client, err := NewSNMPv3AuthClient(config)
+
+						if err == nil {
+							oids := []string{"1.3.6.1.2.1.1.1.0"}
+							_, err = client.Get(oids, false)
+
+							if err == nil {
+								userFound = true
+								resultsMutex.Lock()
+								results = append(results, SNMPResult{
+									IP:           ip,
+									Username:     username,
+									AuthProtocol: authProto,
+									Success:      true,
+								})
+								resultsMutex.Unlock()
+								color.Green("[+] Valid username found on %s: %s", ip, username)
+							}
+							client.Close()
+						}
 					}
-					client.Close()
+
+					if !userFound {
+						fmt.Printf("[-] Testing username %s (%d/%d): Invalid user\n",
+							username, work.current, totalTests)
+					}
 				}
 			}
-
-			if !userFound {
-				fmt.Printf("[-] %s: Invalid user\n", username)
-			}
-		}
+		}()
 	}
+
+	// Send usernames to workers
+	for i, username := range usernames {
+		workChan <- workItem{username: username, current: i + 1}
+	}
+	close(workChan)
+	wg.Wait()
+
 	return results
 }
 
@@ -854,4 +885,36 @@ func tryAuthPriv(ip, username, authPass, privPass, authProto, privProto, protoco
 		Command:      walkCmd,
 		Message:      fmt.Sprintf("Auth: %s, Priv: %s", authProto, privProto),
 	}
+}
+
+func displayUserEnumResults(results []SNMPResult) {
+	if len(results) == 0 {
+		fmt.Println("\nNo valid usernames found.")
+		return
+	}
+
+	fmt.Println("\nValid Usernames Found:")
+	fmt.Println("==================")
+
+	// Create and configure table
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Host", "Username"})
+	table.SetBorders(tablewriter.Border{Left: true, Top: true, Right: true, Bottom: true})
+	table.SetCenterSeparator("|")
+	table.SetAutoWrapText(false)
+	table.SetRowLine(true)
+	table.SetAutoFormatHeaders(true)
+	table.SetHeaderColor(
+		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiYellowColor},
+		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiYellowColor},
+	)
+
+	for _, result := range results {
+		table.Append([]string{
+			result.IP,
+			result.Username,
+		})
+	}
+
+	table.Render()
 }
