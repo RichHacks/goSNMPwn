@@ -63,6 +63,23 @@ We might also classify a user as valid because SNMP returns an authentication fa
 [+] Valid username found on 192.168.26.11: admin (Authentication failure)
 ~~~
 
+A good process is to check the difference in responses between what goSNMPwn has identified as valid, and invalid. So we would take 'admin' from the above example, and then also use a randomly generated username and check the differences with SNMPWalk:
+
+~~~
+snmpwalk -v3 -l authNoPriv -u admin -a MD5 -A password -t 2 -r 2 192.168.26.11
+No log handling enabled - using stderr logging
+snmpwalk: Authentication failure (incorrect password, community or key)
+~~~
+
+We can see that we actually get an `Authentication failure` message back, but do we get these for invalid users too?
+
+~~~
+snmpwalk -v3 -l authNoPriv -u terrycruise -a MD5 -A password -t 2 -r 2 192.168.26.11
+No log handling enabled - using stderr logging
+snmpwalk: Unknown user name
+~~~
+
+The answer in this case is no. But let's assume we haven't identified all edge cases and maybe validate some to be safe before reporting them, or report them with a caveat.
 
 ### Password Brute Force
 
