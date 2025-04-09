@@ -430,7 +430,7 @@ func performUserEnum(ips []string, userFile string, protocol string, port int, w
 									Success:      true,
 								})
 								resultsMutex.Unlock()
-								color.Green("[+] Valid username found on %s: %s (Identified due to lack of 'unknown username' error)", ip, username)
+								color.Green("[+] Valid username found on %s: %s", ip, username)
 							} else {
 								errStr := err.Error()
 								if strings.Contains(errStr, "authentication failure") ||
@@ -447,8 +447,8 @@ func performUserEnum(ips []string, userFile string, protocol string, port int, w
 									})
 									resultsMutex.Unlock()
 									color.Green("[+] Valid username found on %s: %s (Authentication failure)", ip, username)
-								} else if !strings.Contains(errStr, "unknown username") {
-									fmt.Printf("[-] Testing username %s on %s (%d/%d): Invalid user\n", username, ip, work.current, totalTests)
+								} else if strings.Contains(errStr, "unknown username") && !userFound {
+									fmt.Printf("[-] Testing username %s on %s (%d/%d): %s\n", username, ip, work.current, totalTests, errStr)
 								}
 							}
 							client.Close()
@@ -456,8 +456,9 @@ func performUserEnum(ips []string, userFile string, protocol string, port int, w
 					}
 
 					if !userFound {
-						fmt.Printf("[-] Testing username %s on %s (%d/%d): Invalid user\n",
-							username, ip, work.current, totalTests)
+						// Remove this line to avoid duplicate error messages
+						// fmt.Printf("[-] Testing username %s on %s (%d/%d): Invalid user\n",
+						// 	username, ip, work.current, totalTests)
 					}
 				}
 			}
