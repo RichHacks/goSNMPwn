@@ -40,15 +40,28 @@ User enumeration relies on the fact that SNMP responds in a specific way when us
 ~~~bash
 ./goSNMPwn --userenum -ips 10.10.10.1 -userfile testusers.txt [-port 161]
 
-=== Testing IP: 10.10.10.1 ===
-[+] Valid username found on 10.10.10.1: cisco
-[+] Valid username found on 10.10.10.1: snmp
+[!] Skipping username 'thiswontbevalidifitsreturnedforreal' - exceeds 32 character limit
+[*] Starting user enumeration with 10 workers
+[*] Testing 7 usernames against 1 IPs
+[+] Valid username found on 192.168.26.11: snmpuser1 (Identified due to lack of 'unknown username' error)
+[+] Valid username found on 192.168.26.11: cisco (Identified due to lack of 'unknown username' error)
+[-] Testing username private on 192.168.26.11 (7/7): Invalid user
+[-] Testing username public on 192.168.26.11 (6/7): Invalid user
+[-] Testing username snmpforti on 192.168.26.11 (4/7): Invalid user
+[-] Testing username admin on 192.168.26.11 (5/7): Invalid user
+[+] Valid username found on 192.168.26.11: snmp (Identified due to lack of 'unknown username' error)
 
 Valid usernames saved to: foundusers_20250213_185106.txt
 
 ~~~
 
-As you can see, it drops these to a file so we can use them in further attacks
+As you can see, it drops these to a file so we can use them in further attacks. The output also tells us why we think the user is valid or invalid. As we said previously, SNMPv3 will return a specific message to tell us a user is not valid, if we do not see that, we assume the user is valid. I print the reason just in case we see edge cases, but we should assume some level of unreliability. 
+
+We might also classify a user as valid because SNMP returns an authentication failure, which it will not do for invalid users:
+
+~~~bash
+[+] Valid username found on 192.168.26.11: admin (Authentication failure)
+~~~
 
 
 ### Password Brute Force
