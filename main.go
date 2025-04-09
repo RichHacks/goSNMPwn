@@ -45,16 +45,6 @@ type SNMPResult struct {
 	Command      string
 }
 
-type SNMPLogger struct{}
-
-func (l *SNMPLogger) Print(v ...interface{}) {
-	fmt.Printf("SNMP DEBUG: %v\n", v...)
-}
-
-func (l *SNMPLogger) Printf(format string, v ...interface{}) {
-	fmt.Printf("SNMP DEBUG: "+format, v...)
-}
-
 // NewSNMPv3EnumClient - specifically for engine enumeration
 func NewSNMPv3EnumClient(config *SNMPv3Config) (*SNMPv3Client, error) {
 	client := &gosnmp.GoSNMP{
@@ -62,6 +52,7 @@ func NewSNMPv3EnumClient(config *SNMPv3Config) (*SNMPv3Client, error) {
 		Port:          uint16(config.Port),
 		Version:       gosnmp.Version3,
 		Timeout:       time.Duration(config.TimeoutSecs) * time.Second,
+		Retries:       1,
 		SecurityModel: gosnmp.UserSecurityModel,
 		MsgFlags:      gosnmp.NoAuthNoPriv,
 		SecurityParameters: &gosnmp.UsmSecurityParameters{
@@ -99,6 +90,7 @@ func NewSNMPv3AuthClient(config *SNMPv3Config) (*SNMPv3Client, error) {
 		Port:          uint16(config.Port),
 		Version:       gosnmp.Version3,
 		Timeout:       time.Duration(config.TimeoutSecs) * time.Second,
+		Retries:       1,
 		SecurityModel: gosnmp.UserSecurityModel,
 		MsgFlags:      msgFlags,
 		SecurityParameters: &gosnmp.UsmSecurityParameters{
@@ -112,13 +104,16 @@ func NewSNMPv3AuthClient(config *SNMPv3Config) (*SNMPv3Client, error) {
 	}
 
 	err := client.Connect()
+	if err != nil {
+		return nil, err
+	}
 	return &SNMPv3Client{client: client}, err
 }
 
 func (c *SNMPv3Client) Get(oids []string, showDetails bool) (map[string]interface{}, error) {
 	result, err := c.client.Get(oids)
 	if err != nil {
-		return nil, fmt.Errorf("get error: %v", err)
+		return nil, err
 	}
 
 	values := make(map[string]interface{})
@@ -364,6 +359,17 @@ func performUserEnum(ips []string, userFile string, protocol string, port int, w
 		log.Fatalf("Failed to load usernames: %v", err)
 	}
 
+	// Filter out usernames longer than 32 characters
+	var validUsernames []string
+	for _, username := range usernames {
+		if len(username) <= 32 {
+			validUsernames = append(validUsernames, username)
+		} else {
+			fmt.Printf("[!] Skipping username '%s' - exceeds 32 character limit\n", username)
+		}
+	}
+	usernames = validUsernames
+
 	// Create a channel for work items (username + progress)
 	type workItem struct {
 		username string
@@ -386,7 +392,7 @@ func performUserEnum(ips []string, userFile string, protocol string, port int, w
 				AuthPassword: "authpass",
 				PrivProtocol: "AES",
 				PrivPassword: "privpass",
-				TimeoutSecs:  2,
+				TimeoutSecs:  5,
 				Transport:    protocol,
 			}
 
@@ -421,14 +427,33 @@ func performUserEnum(ips []string, userFile string, protocol string, port int, w
 								})
 								resultsMutex.Unlock()
 								color.Green("[+] Valid username found on %s: %s", ip, username)
+							} else {
+								errStr := err.Error()
+								if strings.Contains(errStr, "authentication failure") ||
+									strings.Contains(errStr, "authorization error") ||
+									strings.Contains(errStr, "wrong digest") ||
+									(protocol == "tcp" && strings.Contains(errStr, "request timeout")) {
+									userFound = true
+									resultsMutex.Lock()
+									results = append(results, SNMPResult{
+										IP:           ip,
+										Username:     username,
+										AuthProtocol: authProto,
+										Success:      true,
+									})
+									resultsMutex.Unlock()
+									color.Green("[+] Valid username found on %s: %s (Authentication failure)", ip, username)
+								} else if !strings.Contains(errStr, "unknown username") {
+									fmt.Printf("[-] Testing username %s on %s (%d/%d): Invalid user\n", username, ip, work.current, totalTests)
+								}
 							}
 							client.Close()
 						}
 					}
 
 					if !userFound {
-						fmt.Printf("[-] Testing username %s (%d/%d): Invalid user\n",
-							username, work.current, totalTests)
+						fmt.Printf("[-] Testing username %s on %s (%d/%d): Invalid user\n",
+							username, ip, work.current, totalTests)
 					}
 				}
 			}
@@ -776,14 +801,12 @@ func tryNullAuth(ip, username, protocol string, current, total int32, port int) 
 
 	client, err := NewSNMPv3AuthClient(config)
 	if err != nil {
-		fmt.Printf("DEBUG [NULL Auth] Connection error: %v\n", err)
 		return nil
 	}
 	defer client.Close()
 
 	oids := []string{"1.3.6.1.2.1.1.1.0"}
 	result, err := client.client.Get(oids) // Get raw result to check variables
-	fmt.Printf("DEBUG [NULL Auth] Get error: %v\n", err)
 
 	// Check if we actually got data back
 	if err == nil && result != nil && len(result.Variables) > 0 && result.Variables[0].Value != nil {
@@ -826,7 +849,6 @@ func tryAuthNoPriv(ip, username, password, authProto, protocol string, current, 
 		return nil
 	}
 
-	// Modified success message to show both protocols
 	color.Green("[+] [AuthNoPriv] SUCCESS: %s@%s (Auth Protocol:%s Auth Password:%s)",
 		username, ip, authProto, password)
 	walkCmd := fmt.Sprintf("snmpwalk -v3 -l authNoPriv -u %s -a %s -A %s %s",
