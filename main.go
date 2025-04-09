@@ -310,6 +310,10 @@ func main() {
 	port := flag.Int("port", 161, "SNMP port number")
 	flag.Parse()
 
+	// Print warning message
+	color.Red("\nWARNING: Please note that the very nature of identification of some of these issues can be unreliable.")
+	color.Red("Manual validation is always required.\n")
+
 	if !*enumFlag && !*bruteFlag && !*userEnumFlag {
 		log.Fatal("Must specify either --enum, --userenum, or --brute flag")
 	}
@@ -426,7 +430,7 @@ func performUserEnum(ips []string, userFile string, protocol string, port int, w
 									Success:      true,
 								})
 								resultsMutex.Unlock()
-								color.Green("[+] Valid username found on %s: %s", ip, username)
+								color.Green("[+] Valid username found on %s: %s (Identified due to lack of 'unknown username' error)", ip, username)
 							} else {
 								errStr := err.Error()
 								if strings.Contains(errStr, "authentication failure") ||
@@ -910,33 +914,26 @@ func tryAuthPriv(ip, username, authPass, privPass, authProto, privProto, protoco
 }
 
 func displayUserEnumResults(results []SNMPResult) {
-	if len(results) == 0 {
+	if len(results) > 0 {
+		fmt.Println("\nValid Usernames Found:")
+		fmt.Println("==================")
+		fmt.Println("|-----------------|----------|")
+		fmt.Println("|      HOST       | USERNAME |")
+		fmt.Println("|-----------------|----------|")
+		for _, result := range results {
+			fmt.Printf("| %-15s | %-8s |\n", result.IP, result.Username)
+		}
+		fmt.Println("|-----------------|----------|")
+		fmt.Println("\nTo manually test these usernames, try:")
+		fmt.Println("UDP:")
+		fmt.Println("snmpwalk -v3 -l authNoPriv -u <username> -a MD5 -A password <ip>")
+		fmt.Println("or")
+		fmt.Println("snmpwalk -v3 -l authNoPriv -u <username> -a SHA -A password <ip>")
+		fmt.Println("\nTCP:")
+		fmt.Println("snmpwalk -v3 -l authNoPriv -u <username> -a MD5 -A password -t 2 -r 2 tcp:<ip>:161")
+		fmt.Println("or")
+		fmt.Println("snmpwalk -v3 -l authNoPriv -u <username> -a SHA -A password -t 2 -r 2 tcp:<ip>:161")
+	} else {
 		fmt.Println("\nNo valid usernames found.")
-		return
 	}
-
-	fmt.Println("\nValid Usernames Found:")
-	fmt.Println("==================")
-
-	// Create and configure table
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Host", "Username"})
-	table.SetBorders(tablewriter.Border{Left: true, Top: true, Right: true, Bottom: true})
-	table.SetCenterSeparator("|")
-	table.SetAutoWrapText(false)
-	table.SetRowLine(true)
-	table.SetAutoFormatHeaders(true)
-	table.SetHeaderColor(
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiYellowColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiYellowColor},
-	)
-
-	for _, result := range results {
-		table.Append([]string{
-			result.IP,
-			result.Username,
-		})
-	}
-
-	table.Render()
 }
